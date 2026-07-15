@@ -1,0 +1,11 @@
+@font-face {
+  font-family: "DM Mono";
+  src: local("Cascadia Mono"), local("Consolas");
+  font-weight: 400 700;
+}
+
+@font-face {
+  font-family: "Manrope";
+  src: local("Segoe UI Variable"), local("Segoe UI");
+  font-weight: 400 900;
+}

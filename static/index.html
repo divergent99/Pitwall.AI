@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090b0d">
+  <title>PitWall AI — Race strategy, explained</title>
+  <link rel="stylesheet" href="/static/fonts.css">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/views.css">
+  <link rel="stylesheet" href="/static/upgrades.css">
+  <link rel="stylesheet" href="/static/responsive-fix.css">
+  <link rel="stylesheet" href="/static/replay.css">
+  <link rel="stylesheet" href="/static/replay-additions.css">
+  <link rel="stylesheet" href="/static/decision-intel.css">
+  <link rel="stylesheet" href="/static/circuits.css">
+  <link rel="stylesheet" href="/static/season.css">
+  <link rel="stylesheet" href="/static/global-fixes.css">
+  <link rel="stylesheet" href="/static/backtest.css">
+  <link rel="stylesheet" href="/static/agent.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <a class="brand" href="#"><span class="brand-mark">PW</span><span>PITWALL<span class="lime">.AI</span></span></a>
+      <nav>
+        <button class="nav-item active" data-view="strategy" aria-label="Strategy"><span>⌁</span><small>Strategy</small></button>
+        <button class="nav-item" data-view="telemetry" aria-label="Telemetry"><span>⌇</span><small>Telemetry</small></button>
+        <button class="nav-item" data-view="scenarios" aria-label="Scenarios"><span>◫</span><small>Scenarios</small></button>
+        <button class="nav-item" data-view="season" aria-label="Season hub"><span>24</span><small>Season</small></button>
+      </nav>
+      <div class="rail-bottom"><span class="status-dot"></span><small>ENGINE<br>ONLINE</small></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">LIVE STRATEGY ROOM</p><div class="circuit-heading"><select id="circuitSelect" aria-label="Select circuit"><option value="marina-bay">Marina Bay</option><option value="monza">Monza</option><option value="silverstone">Silverstone</option></select><span>·</span><h1 id="raceName">Race 08</h1></div><p id="circuitProfile" class="circuit-profile">HIGH DEG · 20.5s PIT LOSS · STRONG UNDERCUT</p></div>
+        <div class="top-actions"><button id="shareBtn" class="utility-btn">SHARE PLAN</button><button id="replayBtn" class="utility-btn lime-btn">▶ PLAY STRATEGY</button><div class="live"><span></span>LIVE&nbsp;&nbsp; LAP <strong id="lapBadge">18</strong> / <strong id="totalBadge">57</strong></div></div>
+      </header>
+
+      <section class="race-strip">
+        <div class="position"><small>POSITION</small><strong>P<span id="positionBadge">4</span></strong></div>
+        <div class="metric"><small>GAP AHEAD</small><strong id="gapAhead">+2.4s</strong><em>TRAFFIC TARGET</em></div>
+        <div class="metric"><small>GAP BEHIND</small><strong id="gapBehind">+1.8s</strong><em>RIVAL WINDOW</em></div>
+        <div class="metric weather"><small>TRACK</small><strong id="trackTemperatureBadge">31°C</strong><em id="trackStatus">RAIN IN 20 LAPS</em></div>
+        <div class="track-map" aria-label="Marina Bay Street Circuit map"><svg viewBox="0 0 500 500"><path id="trackPath"/><circle id="replayCar" r="7"/></svg></div>
+      </section>
+
+      <section id="replayStage" class="replay-stage" hidden>
+        <div class="replay-stage-head"><div><p class="eyebrow lime">STRATEGY PLAYBACK · PROJECTED, NOT LIVE TELEMETRY</p><h2 id="replayStrategyName">Recommended strategy</h2></div><div class="replay-controls"><label>RACE TIME <select id="replaySpeed"><option value="1">REAL-TIME</option><option value="10">10×</option><option value="30" selected>30×</option><option value="60">60×</option></select></label><button id="closeReplay" aria-label="Close replay">CLOSE ×</button></div></div>
+        <div class="replay-stage-body">
+          <div class="replay-circuit"><svg viewBox="0 0 500 500"><path id="stageTrackPath"/><circle id="stageCar" r="9"/></svg><small id="trackCredit" class="track-credit">ACCURATE LAYOUT VECTOR © JULES ROY / F1DB · CC BY 4.0</small><div class="circuit-glow"></div></div>
+          <div class="replay-hud">
+            <div class="hud-lap"><small>PROJECTED LAP</small><strong>L<span id="stageLap">18</span></strong><em>OF <span id="stageTotal">57</span></em><p id="stageScale">30× · ~3.1 seconds per lap</p></div>
+            <div class="hud-grid"><div><small>TYRE</small><strong id="stageTyre">MEDIUM</strong></div><div><small>LAP TIME</small><strong id="stageTime">--.---</strong></div><div><small>EVENT</small><strong id="stageEvent">PUSH</strong></div><div><small>DELTA</small><strong id="stageDelta">FASTEST</strong></div></div>
+            <div class="replay-radio"><span>ORBIT</span><p id="stageCall">Executing the recommended race plan.</p></div>
+          </div>
+        </div>
+        <div class="replay-progress"><i id="stageProgress"></i><input id="replayScrubber" type="range" min="0" max="100" value="0" aria-label="Replay timeline"></div>
+      </section>
+
+      <section id="auxPanel" class="aux-panel" hidden></section>
+      <section id="strategyView" class="workspace">
+        <div class="control-panel card">
+          <div class="section-title"><span>01</span><div><h2>Race state</h2><p>Adjust the conditions</p></div></div>
+          <form id="scenarioForm">
+            <label>Current lap <output id="currentLapOut">18</output><input id="currentLap" type="range" min="1" max="56" value="18"></label>
+            <div class="field-row"><label>Race position<select id="racePosition"></select></label><label>Tyre age<input id="tyreAge" type="number" min="0" max="60" value="18"></label></div><label>Total laps<input id="totalLaps" type="number" min="15" max="90" value="57"></label><div class="field-row"><label>Gap ahead · s<input id="gapAheadInput" type="number" min="0" max="60" step="0.1" value="2.4"></label><label>Gap behind · s<input id="gapBehindInput" type="number" min="0" max="60" step="0.1" value="1.8"></label></div><label>Track temperature · °C<input id="trackTemperature" type="number" min="10" max="70" step="1" value="31"></label>
+            <label>Current compound<select id="compound"><option>SOFT</option><option selected>MEDIUM</option><option>HARD</option></select></label>
+            <label>Rain forecast <span class="switch"><input id="rainEnabled" type="checkbox" checked><i></i></span></label>
+            <label id="rainField">Crossover lap <output id="rainLapOut">38</output><input id="rainLap" type="range" min="2" max="56" value="38"></label>
+            <label>Safety car <select id="safetyCar"><option value="">None</option><option value="22">Lap 22</option><option value="30">Lap 30</option><option value="40">Lap 40</option></select></label>
+            <button class="run-btn" type="submit"><span>RUN STRATEGY MODEL</span><b>→</b></button>
+          </form>
+          <p class="engine-note"><span></span> Deterministic engine · v1.0</p>
+        </div>
+
+        <div class="analysis">
+          <div class="recommendation card">
+            <div><p class="eyebrow lime">PITWALL RECOMMENDATION</p><h2 id="headline">Calculating strategy…</h2><p id="subhead">Running 3 counterfactual race plans.</p></div>
+            <div class="confidence"><svg viewBox="0 0 80 80"><circle cx="40" cy="40" r="31"/><circle id="confidenceRing" class="progress" cx="40" cy="40" r="31"/></svg><strong id="confidence">--</strong><small>CONFIDENCE</small></div>
+          </div>
+
+          <div id="decisionIntel" class="decision-intel card" aria-live="polite"></div>
+          <div id="changePanel" class="change-panel card" hidden aria-live="polite"></div>
+
+          <div id="strategyCards" class="strategy-grid" aria-live="polite"></div>
+
+          <div id="uncertaintyPanel" class="uncertainty card"><div class="uncertainty-loading">Running 240 uncertainty trials…</div></div>
+
+          <div class="chart-card card">
+            <div class="chart-head"><div><p class="eyebrow">PROJECTED RACE DELTA</p><h3>Strategy comparison</h3></div><div id="legend" class="legend"></div></div>
+            <svg id="strategyChart" viewBox="0 0 760 220" preserveAspectRatio="none" aria-label="Projected strategy delta chart"></svg>
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </div>
+
+        <aside class="radio card">
+          <div class="section-title"><span>02</span><div><h2>ORBIT</h2><p>GPT-5.6 race engineer</p></div><button id="voiceToggle" class="voice-btn" aria-label="Toggle voice">◖))</button><i id="aiMode">DEMO</i></div>
+          <div id="messages" class="messages">
+            <div class="message orbit"><small>ORBIT · NOW</small><p>Strategy model ready. Give me a scenario and I’ll make the call.</p></div>
+          </div>
+          <div class="quick-prompts"><button>Should we box now?</button><button>What if rain arrives early?</button><button>Explain the risk.</button></div>
+          <form id="chatForm" class="chat-box"><input id="question" placeholder="Ask your race engineer…" autocomplete="off"><button aria-label="Send">↑</button></form>
+          <p class="powered">POWERED BY <strong>GPT-5.6</strong> · RESPONSES API</p>
+        </aside>
+      </section>
+    </main>
+  </div>
+  <div id="onboarding" class="onboarding" hidden>
+    <div class="onboarding-card"><div class="onboarding-mark">PW</div><p class="eyebrow lime">WELCOME TO THE PIT WALL</p><h2>Every second is a decision.</h2><p>PitWall runs counterfactual race strategies, stress-tests them against uncertainty, and gives you an AI race engineer who can explain the call.</p><div class="onboarding-steps"><span><b>01</b> Set race state</span><span><b>02</b> Simulate outcomes</span><span><b>03</b> Make the call</span></div><button id="enterPitwall">ENTER STRATEGY ROOM →</button></div>
+  </div>
+  <div id="toast" role="status"></div>
+  <script src="/static/track.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

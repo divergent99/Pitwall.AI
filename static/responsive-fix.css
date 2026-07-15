@@ -1,0 +1,17 @@
+@media (max-width: 900px) {
+  .top-actions #replayBtn {
+    display: block;
+    padding: 0 8px;
+    font-size: 7px;
+  }
+
+  .top-actions #shareBtn {
+    display: none;
+  }
+}
+
+@media (max-width: 540px) {
+  .top-actions .live {
+    display: none;
+  }
+}
