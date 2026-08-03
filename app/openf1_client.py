@@ -14,11 +14,15 @@ that reason.
 from __future__ import annotations
 
 import time
+import unicodedata
 import httpx
 
 BASE_URL = "https://api.openf1.org/v1"
 _TIMEOUT = 10
 _TTL = 3600  # 1 hour: results/calendar data doesn't need to be fresher than this
+_NEGATIVE_TTL = 60  # cache *failures* briefly too, so a burst of page loads
+                     # doesn't hammer OpenF1 retrying the same failing call
+                     # dozens of times a second
 
 _CACHE: dict[str, tuple[float, object]] = {}
 
@@ -29,8 +33,11 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
     now = time.time()
 
     cached = _CACHE.get(key)
-    if cached and now - cached[0] < ttl:
-        return cached[1]
+    if cached is not None:
+        cached_at, value = cached
+        effective_ttl = ttl if value is not None else _NEGATIVE_TTL
+        if now - cached_at < effective_ttl:
+            return value
 
     try:
         resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
@@ -39,9 +46,17 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
         _CACHE[key] = (now, data)
         return data
     except (httpx.HTTPError, httpx.TimeoutException, ValueError):
-        # ValueError covers bad JSON. Serve stale cache if we have it,
-        # otherwise let the caller fall back to static data.
-        return cached[1] if cached else None
+        # ValueError covers bad JSON. Cache the failure briefly (see
+        # _NEGATIVE_TTL) instead of retrying immediately on every request.
+        _CACHE[key] = (now, None)
+        return None
+
+
+def _normalize(text: str) -> str:
+    """Lowercase and strip accents so 'Montréal' matches 'Montreal'."""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return text.strip().lower()
 
 
 def get_meetings(year: int = 2026) -> list:
@@ -68,19 +83,33 @@ def get_pit_stops(session_key: int, driver_number: int) -> list:
     return _get("/pit", {"session_key": session_key, "driver_number": driver_number}) or []
 
 
-def find_meeting(meetings: list, venue_or_location: str) -> dict | None:
-    """Match a CALENDAR venue string against OpenF1 meeting `location`.
+def get_championship_drivers(session_key: int) -> list:
+    """Driver standings as of this race session. Race sessions only."""
+    return _get("/championship_drivers", {"session_key": session_key}) or []
 
-    OpenF1's `location` field (e.g. "Spa-Francorchamps", "Silverstone",
-    "Sakhir") lines up closely with the venue strings already used in
-    season.CALENDAR, so a normalized substring match is enough for most
-    rounds. A few venues need aliasing (see season.VENUE_ALIASES).
+
+def get_championship_teams(session_key: int) -> list:
+    """Constructor standings as of this race session. Race sessions only."""
+    return _get("/championship_teams", {"session_key": session_key}) or []
+
+
+def find_meeting(meetings: list, venue_or_location: str) -> dict | None:
+    """Match a CALENDAR venue string against an OpenF1 meeting.
+
+    Checked against `location`, `circuit_short_name`, and `country_name` --
+    OpenF1 doesn't always use the same string a CALENDAR venue uses (e.g.
+    Monaco's `location` is "Monte Carlo", but `country_name` is "Monaco").
+    Comparison is accent-normalized so "Montreal" matches "Montréal".
+    A few venues still need aliasing (see season.VENUE_ALIASES) for names
+    that don't overlap with any of these three fields at all.
     """
-    needle = venue_or_location.strip().lower()
+    needle = _normalize(venue_or_location)
+    fields = ("location", "circuit_short_name", "country_name")
     for m in meetings:
-        loc = (m.get("location") or "").strip().lower()
-        if not loc:
-            continue
-        if needle == loc or needle in loc or loc in needle:
-            return m
+        for field in fields:
+            value = _normalize(m.get(field) or "")
+            if not value:
+                continue
+            if needle == value or needle in value or value in needle:
+                return m
     return None
