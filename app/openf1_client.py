@@ -13,10 +13,13 @@ that reason.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import unicodedata
 import httpx
+
+logger = logging.getLogger("pitwall.openf1")
 
 BASE_URL = "https://api.openf1.org/v1"
 _TIMEOUT = 10
@@ -68,6 +71,7 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
         if hit:
             return value
 
+        last_exc = None
         for attempt in range(_RETRIES + 1):
             try:
                 resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
@@ -75,10 +79,16 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
                 data = resp.json()
                 _CACHE[key] = (time.time(), data)
                 return data
-            except (httpx.HTTPError, httpx.TimeoutException, ValueError):
+            except (httpx.HTTPError, httpx.TimeoutException, ValueError) as exc:
+                last_exc = exc
                 if attempt < _RETRIES:
                     time.sleep(_RETRY_DELAY)
 
+        status = getattr(getattr(last_exc, "response", None), "status_code", None)
+        logger.warning(
+            "openf1: request failed for %s%s after %d attempt(s): %r",
+            path, f" [status={status}]" if status else "", _RETRIES + 1, last_exc,
+        )
         _CACHE[key] = (time.time(), None)
         return None
 
@@ -122,6 +132,10 @@ def get_championship_drivers(session_key: int) -> list:
 def get_championship_teams(session_key: int) -> list:
     """Constructor standings as of this race session. Race sessions only."""
     return _get("/championship_teams", {"session_key": session_key}) or []
+
+
+def get_laps(session_key: int) -> list:
+    return _get("/laps", {"session_key": session_key}) or []
 
 
 def find_meeting(meetings: list, venue_or_location: str) -> dict | None:
