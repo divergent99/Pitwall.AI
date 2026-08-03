@@ -13,6 +13,7 @@ that reason.
 """
 from __future__ import annotations
 
+import threading
 import time
 import unicodedata
 import httpx
@@ -22,33 +23,63 @@ _TIMEOUT = 10
 _TTL = 3600  # 1 hour: results/calendar data doesn't need to be fresher than this
 _NEGATIVE_TTL = 60  # cache *failures* briefly too, so a burst of page loads
                      # doesn't hammer OpenF1 retrying the same failing call
-                     # dozens of times a second
+_RETRIES = 1  # one retry on transient failure before caching a miss
+_RETRY_DELAY = 0.3
 
 _CACHE: dict[str, tuple[float, object]] = {}
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _cached(key: str, ttl: int):
+    entry = _CACHE.get(key)
+    if entry is None:
+        return None, False
+    cached_at, value = entry
+    effective_ttl = ttl if value is not None else _NEGATIVE_TTL
+    if time.time() - cached_at < effective_ttl:
+        return value, True
+    return None, False
 
 
 def _get(path: str, params: dict | None = None, ttl: int = _TTL):
     params = params or {}
     key = f"{path}?{sorted(params.items())}"
-    now = time.time()
 
-    cached = _CACHE.get(key)
-    if cached is not None:
-        cached_at, value = cached
-        effective_ttl = ttl if value is not None else _NEGATIVE_TTL
-        if now - cached_at < effective_ttl:
+    value, hit = _cached(key, ttl)
+    if hit:
+        return value
+
+    # Serialize concurrent requests for the *same* key so a burst of
+    # simultaneous page loads on a cold cache makes one network call, not
+    # N of them. Everyone else just waits for the first to finish, then
+    # reads the cache the first caller populated.
+    with _lock_for(key):
+        value, hit = _cached(key, ttl)  # another thread may have just filled it
+        if hit:
             return value
 
-    try:
-        resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        _CACHE[key] = (now, data)
-        return data
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError):
-        # ValueError covers bad JSON. Cache the failure briefly (see
-        # _NEGATIVE_TTL) instead of retrying immediately on every request.
-        _CACHE[key] = (now, None)
+        for attempt in range(_RETRIES + 1):
+            try:
+                resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
+                resp.raise_for_status()
+                data = resp.json()
+                _CACHE[key] = (time.time(), data)
+                return data
+            except (httpx.HTTPError, httpx.TimeoutException, ValueError):
+                if attempt < _RETRIES:
+                    time.sleep(_RETRY_DELAY)
+
+        _CACHE[key] = (time.time(), None)
         return None
 
 
