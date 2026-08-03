@@ -13,8 +13,9 @@ Driver/team standings now come from OpenF1's championship_drivers /
 championship_teams endpoints too, keyed off the most recent race session
 whose date has passed, with the same bundled-fallback safety net.
 
-Still on the bundled fallback, not yet live: fastest-lap-of-the-race
-per round. That's a heavier fetch (per-round /laps pull) not wired in here.
+Fastest lap per round is now live too, computed from OpenF1's /laps
+endpoint (minimum lap_duration, excluding pit-out laps), with the same
+per-round bundled-fallback safety net as everything else here.
 """
 from __future__ import annotations
 
@@ -118,6 +119,22 @@ def _normalize_team(name: str | None) -> str | None:
     return _TEAM_ALIASES.get(name, name)
 
 
+def _fastest_lap(session_key: int) -> dict | None:
+    """Fastest valid lap of the session (excludes pit-out laps, which are
+    artificially slow and don't count as a real fastest lap)."""
+    laps = of1.get_laps(session_key)
+    valid = [l for l in laps if l.get("lap_duration") and not l.get("is_pit_out_lap")]
+    if not valid:
+        return None
+    return min(valid, key=lambda l: l["lap_duration"])
+
+
+def _format_lap_time(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    secs = seconds - minutes * 60
+    return f"{minutes}:{secs:06.3f}"
+
+
 def _live_round_result(name: str, venue: str) -> dict | None:
     """Best-effort live result for one round via OpenF1. Returns None if
     the meeting/session/result can't be found (race hasn't happened yet,
@@ -133,36 +150,51 @@ def _live_round_result(name: str, venue: str) -> dict | None:
         if not session:
             logger.warning("season: no Race session found for %s (meeting_key=%s)", name, meeting["meeting_key"])
             return None
+        session_key = session["session_key"]
 
-        classification = of1.get_session_result(session["session_key"])
+        classification = of1.get_session_result(session_key)
         winner_row = next((r for r in classification if r.get("position") == 1), None)
         if not winner_row:
             logger.warning(
                 "season: no P1 row in session_result for %s (session_key=%s, %d rows returned)",
-                name, session["session_key"], len(classification),
+                name, session_key, len(classification),
             )
             return None
 
         driver_number = winner_row.get("driver_number")
-        drivers = of1.get_drivers(session["session_key"], driver_number)
-        driver_info = drivers[0] if drivers else {}
-        if not driver_info:
+        # Fetch every driver in the session once -- needed for the winner's
+        # name/team AND whoever set the fastest lap (often not the winner).
+        drivers_meta = {d["driver_number"]: d for d in of1.get_drivers(session_key)}
+        winner_info = drivers_meta.get(driver_number, {})
+        if not winner_info:
             logger.warning(
                 "season: no driver info for #%s in session %s (%s) -- using session_result data only",
-                driver_number, session["session_key"], name,
+                driver_number, session_key, name,
             )
 
         pits = sorted(
-            of1.get_pit_stops(session["session_key"], driver_number),
+            of1.get_pit_stops(session_key, driver_number),
             key=lambda p: p.get("lap_number", 0),
         )
 
+        fastest_lap_driver = None
+        fastest_lap_time = None
+        fastest = _fastest_lap(session_key)
+        if fastest:
+            fastest_meta = drivers_meta.get(fastest.get("driver_number"), {})
+            fastest_lap_driver = fastest_meta.get("full_name") or fastest_meta.get("broadcast_name")
+            fastest_lap_time = _format_lap_time(fastest["lap_duration"])
+        else:
+            logger.warning("season: no valid laps found for fastest-lap calc in %s (session_key=%s)", name, session_key)
+
         return {
-            "winner": driver_info.get("full_name") or driver_info.get("broadcast_name"),
-            "winner_team": _normalize_team(driver_info.get("team_name")),
+            "winner": winner_info.get("full_name") or winner_info.get("broadcast_name"),
+            "winner_team": _normalize_team(winner_info.get("team_name")),
             "first_stop_lap": pits[0]["lap_number"] if pits else None,
             "stop_count": len(pits) if pits else None,
-            "source": f"https://openf1.org (session_key={session['session_key']})",
+            "source": f"https://openf1.org (session_key={session_key})",
+            "fastest_lap_driver": fastest_lap_driver,
+            "fastest_lap_time": fastest_lap_time,
         }
     except Exception:
         logger.exception("season: live lookup failed for %s (venue=%s)", name, venue)
@@ -401,12 +433,20 @@ def validation_summary() -> dict:
 
 def season_snapshot() -> dict:
     rounds = []
+    fastest_laps = []
     for number, name, venue, race_date, sprint in CALENDAR:
         status, result = _round_status(name, venue, race_date)
         item = {"round": number, "name": name, "venue": venue, "date": race_date, "sprint": sprint, "status": status}
         if status == "completed" and result:
             laps = STRATEGY_PROFILES.get(name, (None,))[0]
             item.update({"winner": result["winner"], "team": result["winner_team"], "laps": laps})
+
+            if result.get("fastest_lap_driver") and result.get("fastest_lap_time"):
+                fastest_laps.append({"grand_prix": name, "driver": result["fastest_lap_driver"], "time": result["fastest_lap_time"]})
+            else:
+                fallback = next((f for f in FALLBACK_FASTEST_LAPS if f[0] == name), None)
+                if fallback:
+                    fastest_laps.append({"grand_prix": fallback[0], "driver": fallback[1], "time": fallback[2]})
         rounds.append(item)
 
     drivers_data, teams_data = _standings()
@@ -426,7 +466,7 @@ def season_snapshot() -> dict:
         "rounds": rounds,
         "drivers": drivers_data,
         "teams": teams_data,
-        "fastest_laps": [{"grand_prix": gp, "driver": driver, "time": time} for gp, driver, time in FALLBACK_FASTEST_LAPS],
+        "fastest_laps": fastest_laps,
     }
 
 
