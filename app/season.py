@@ -9,13 +9,12 @@ the race name appeared in a hand-typed RESULTS list that stopped being
 updated after 2026-07-14. Status is now decided by comparing today's date
 to the race date, then checking for a live (or fallback) result.
 
-Known gap, not fixed here: driver/team championship standings and
-fastest-lap-of-the-race are still served from the bundled fallback lists
-below. OpenF1 exposes beta "championship" endpoints for this, but their
-exact field names weren't confirmed against live docs before writing this,
-so wiring them in speculatively risked shipping something silently wrong.
-Treat _standings() as the next thing to live-wire once you've checked
-https://openf1.org/docs/ for the current shape of those endpoints.
+Driver/team standings now come from OpenF1's championship_drivers /
+championship_teams endpoints too, keyed off the most recent race session
+whose date has passed, with the same bundled-fallback safety net.
+
+Still on the bundled fallback, not yet live: fastest-lap-of-the-race
+per round. That's a heavier fetch (per-round /laps pull) not wired in here.
 """
 from __future__ import annotations
 
@@ -53,14 +52,12 @@ CALENDAR = [
     (22,"Las Vegas","Las Vegas","2026-11-21",False),(23,"Qatar","Lusail","2026-11-29",False),(24,"Abu Dhabi","Yas Marina","2026-12-06",False),
 ]
 
-# Venues where OpenF1's meeting `location` field is not a clean substring
-# match against the CALENDAR venue above. Verify against a live
-# GET /v1/meetings?year=2026 response and adjust as needed -- these are
-# best-guess and not confirmed live.
-VENUE_ALIASES = {
-    "Sao Paulo": "Interlagos",
-    "Marina Bay": "Singapore",
-}
+# Venues where none of OpenF1's location/circuit_short_name/country_name
+# fields overlap with the CALENDAR venue string at all (find_meeting()
+# already handles accents and checks all three fields, so this should stay
+# nearly empty). Confirmed against a real GET /v1/meetings?year=2026
+# response on 2026-08-03.
+VENUE_ALIASES: dict[str, str] = {}
 
 DISRUPTED_ROUNDS = {"Bahrain", "Saudi Arabia"}
 
@@ -225,11 +222,80 @@ def _fallback_standings() -> tuple[list, list]:
     return drivers_data, teams_data
 
 
+def _latest_past_round() -> tuple[str, str] | None:
+    """(name, venue) of the most recent CALENDAR round whose date has passed."""
+    today = date.today()
+    past = [r for r in CALENDAR if date.fromisoformat(r[3]) <= today]
+    if not past:
+        return None
+    latest = max(past, key=lambda r: r[3])
+    return latest[1], latest[2]
+
+
+def _live_standings() -> tuple[list, list] | None:
+    latest = _latest_past_round()
+    if not latest:
+        return None
+    name, venue = latest
+
+    try:
+        meetings = of1.get_meetings(2026)
+        meeting = of1.find_meeting(meetings, VENUE_ALIASES.get(venue, venue))
+        if not meeting:
+            logger.warning("season: no OpenF1 meeting for standings lookup (%s)", name)
+            return None
+
+        session = of1.get_race_session(meeting["meeting_key"])
+        if not session:
+            logger.warning("season: no Race session for standings lookup (%s)", name)
+            return None
+
+        driver_rows = of1.get_championship_drivers(session["session_key"])
+        team_rows = of1.get_championship_teams(session["session_key"])
+        if not driver_rows or not team_rows:
+            logger.warning(
+                "season: championship endpoints returned nothing for session %s (%d drivers, %d teams)",
+                session["session_key"], len(driver_rows), len(team_rows),
+            )
+            return None
+
+        # championship_drivers only has driver_number + points/position -- need
+        # /drivers for names, code, nationality, team.
+        drivers_meta = {d["driver_number"]: d for d in of1.get_drivers(session["session_key"])}
+
+        drivers_data = []
+        for row in sorted(driver_rows, key=lambda r: r.get("position_current", 999)):
+            meta = drivers_meta.get(row.get("driver_number"), {})
+            drivers_data.append({
+                "position": row.get("position_current"),
+                "code": meta.get("name_acronym", ""),
+                "name": meta.get("full_name") or meta.get("broadcast_name", ""),
+                "nationality": meta.get("country_code", ""),
+                "team": _normalize_team(meta.get("team_name")),
+                "points": row.get("points_current"),
+            })
+
+        teams_data = []
+        for row in sorted(team_rows, key=lambda r: r.get("position_current", 999)):
+            team = _normalize_team(row.get("team_name"))
+            teams_data.append({
+                "position": row.get("position_current"),
+                "name": team,
+                "points": row.get("points_current"),
+                "power_unit": FALLBACK_POWER_UNITS.get(team, ""),
+                "drivers": [d["name"] for d in drivers_data if d["team"] == team],
+            })
+
+        if not drivers_data or not teams_data:
+            return None
+        return drivers_data, teams_data
+    except Exception:
+        logger.exception("season: live standings fetch failed")
+        return None
+
+
 def _standings() -> tuple[list, list]:
-    # TODO: wire to OpenF1's beta championship endpoints once their field
-    # names are confirmed against https://openf1.org/docs/. Left on the
-    # bundled fallback for now rather than guessing an endpoint shape.
-    return _fallback_standings()
+    return _live_standings() or _fallback_standings()
 
 
 def strategy_rounds() -> dict:
