@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -10,11 +11,24 @@ from .engine import monte_carlo, simulate
 from .models import EngineerRequest, EngineerResponse, RaceScenario, SimulationResponse
 from .season import backtest_round, season_snapshot, simulate_qualifying, strategy_rounds, validation_summary
 
+logger = logging.getLogger("pitwall.main")
 load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 app = FastAPI(title="PitWall AI", version="0.1.0", description="Explainable motorsport strategy intelligence")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.on_event("startup")
+def warm_openf1_cache():
+    """Populate the OpenF1 cache once, sequentially, before serving traffic.
+    Without this, the first real page load races several concurrent
+    requests against a cold cache at once."""
+    try:
+        season_snapshot()
+        logger.info("main: OpenF1 cache warmed at startup")
+    except Exception:
+        logger.exception("main: startup cache warm-up failed (non-fatal, will retry per-request)")
 
 
 @app.get("/", include_in_schema=False)
