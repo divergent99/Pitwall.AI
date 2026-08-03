@@ -19,10 +19,13 @@ https://openf1.org/docs/ for the current shape of those endpoints.
 """
 from __future__ import annotations
 
+import logging
 from datetime import date
 import random
 
 from . import openf1_client as of1
+
+logger = logging.getLogger("pitwall.season")
 
 # Date the FALLBACK_* data below was last hand-curated. Only surfaces when
 # a live OpenF1 lookup fails for a given round -- it's no longer treated
@@ -126,20 +129,31 @@ def _live_round_result(name: str, venue: str) -> dict | None:
         meetings = of1.get_meetings(2026)
         meeting = of1.find_meeting(meetings, VENUE_ALIASES.get(venue, venue))
         if not meeting:
+            logger.warning("season: no OpenF1 meeting matched for %s (venue=%s)", name, venue)
             return None
 
         session = of1.get_race_session(meeting["meeting_key"])
         if not session:
+            logger.warning("season: no Race session found for %s (meeting_key=%s)", name, meeting["meeting_key"])
             return None
 
         classification = of1.get_session_result(session["session_key"])
         winner_row = next((r for r in classification if r.get("position") == 1), None)
         if not winner_row:
+            logger.warning(
+                "season: no P1 row in session_result for %s (session_key=%s, %d rows returned)",
+                name, session["session_key"], len(classification),
+            )
             return None
 
         driver_number = winner_row.get("driver_number")
         drivers = of1.get_drivers(session["session_key"], driver_number)
         driver_info = drivers[0] if drivers else {}
+        if not driver_info:
+            logger.warning(
+                "season: no driver info for #%s in session %s (%s) -- using session_result data only",
+                driver_number, session["session_key"], name,
+            )
 
         pits = sorted(
             of1.get_pit_stops(session["session_key"], driver_number),
@@ -154,6 +168,7 @@ def _live_round_result(name: str, venue: str) -> dict | None:
             "source": f"https://openf1.org (session_key={session['session_key']})",
         }
     except Exception:
+        logger.exception("season: live lookup failed for %s (venue=%s)", name, venue)
         return None
 
 
