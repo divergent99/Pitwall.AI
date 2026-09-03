@@ -26,8 +26,16 @@ _TIMEOUT = 10
 _TTL = 3600  # 1 hour: results/calendar data doesn't need to be fresher than this
 _NEGATIVE_TTL = 60  # cache *failures* briefly too, so a burst of page loads
                      # doesn't hammer OpenF1 retrying the same failing call
-_RETRIES = 1  # one retry on transient failure before caching a miss
+_RETRIES = 1  # non-429 transient failures (timeouts, network blips): quick retry
 _RETRY_DELAY = 0.3
+
+# 429s need real patience, not the quick retry above: OpenF1's 10s rate
+# window doesn't clear in 0.3s, so a 429 got exactly one useless retry and
+# then a minute of cached failure -- which is what "not getting live data
+# right after a fresh deploy" actually was. Retry_After (seconds) is
+# honored when OpenF1 sends it; otherwise back off on a fixed schedule.
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BACKOFF = (1.0, 2.0, 4.0, 6.0)
 
 _CACHE: dict[str, tuple[float, object]] = {}
 _LOCKS: dict[str, threading.Lock] = {}
@@ -39,7 +47,10 @@ _LOCKS_GUARD = threading.Lock()
 # touches (meetings, sessions, session_result, drivers, pit, laps -- times
 # every completed round). Without this, one page load easily fires 40+
 # distinct requests in a couple seconds and 429s almost everything.
-_RATE_LIMIT = 25          # stay under the documented 30, with headroom
+_RATE_LIMIT = 15          # conservative margin below the documented 30 --
+                          # Railway egress IPs are often shared across
+                          # tenants, so 25 of *our own* requests per 10s
+                          # wasn't leaving enough room
 _RATE_WINDOW = 10.0       # seconds
 _request_times: list[float] = []
 _RATE_GUARD = threading.Lock()
@@ -97,7 +108,11 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
             return value
 
         last_exc = None
-        for attempt in range(_RETRIES + 1):
+        attempts = 0
+        rate_limit_attempts = 0
+        max_attempts = 1 + _RETRIES + _RATE_LIMIT_RETRIES
+        while attempts < max_attempts:
+            attempts += 1
             try:
                 _throttle()
                 resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
@@ -105,15 +120,29 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
                 data = resp.json()
                 _CACHE[key] = (time.time(), data)
                 return data
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response is not None and exc.response.status_code == 429 and rate_limit_attempts < _RATE_LIMIT_RETRIES:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else _RATE_LIMIT_BACKOFF[rate_limit_attempts]
+                    except (TypeError, ValueError):
+                        delay = _RATE_LIMIT_BACKOFF[rate_limit_attempts]
+                    rate_limit_attempts += 1
+                    time.sleep(delay)
+                    continue
+                break
             except (httpx.HTTPError, httpx.TimeoutException, ValueError) as exc:
                 last_exc = exc
-                if attempt < _RETRIES:
+                if attempts <= _RETRIES:
                     time.sleep(_RETRY_DELAY)
+                    continue
+                break
 
         status = getattr(getattr(last_exc, "response", None), "status_code", None)
         logger.warning(
             "openf1: request failed for %s%s after %d attempt(s): %r",
-            path, f" [status={status}]" if status else "", _RETRIES + 1, last_exc,
+            path, f" [status={status}]" if status else "", attempts, last_exc,
         )
         _CACHE[key] = (time.time(), None)
         return None
