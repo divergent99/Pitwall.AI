@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import threading
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -21,14 +22,29 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.on_event("startup")
 def warm_openf1_cache():
-    """Populate the OpenF1 cache once, sequentially, before serving traffic.
-    Without this, the first real page load races several concurrent
-    requests against a cold cache at once."""
-    try:
-        season_snapshot()
-        logger.info("main: OpenF1 cache warmed at startup")
-    except Exception:
-        logger.exception("main: startup cache warm-up failed (non-fatal, will retry per-request)")
+    """Populate the OpenF1 cache once, sequentially, in the background,
+    before most page loads hit it -- without blocking startup itself.
+
+    This used to call season_snapshot() directly inside the startup event,
+    which blocks Uvicorn from reporting "started" until it returns. That
+    was fine when a failed OpenF1 call gave up after one quick retry, but
+    with real backoff on 429s (needed so a rate-limited cold start
+    eventually succeeds instead of quietly falling back to stale data --
+    see openf1_client._RATE_LIMIT_BACKOFF), a heavily-throttled warm-up
+    across ~11 completed rounds can take well over Railway's 2-minute
+    health-check window. Running it in a background thread lets Uvicorn
+    report healthy immediately; the first real request or two may race a
+    still-warming cache, but that's far better than the container never
+    becoming reachable at all.
+    """
+    def _warm():
+        try:
+            season_snapshot()
+            logger.info("main: OpenF1 cache warmed at startup")
+        except Exception:
+            logger.exception("main: startup cache warm-up failed (non-fatal, will retry per-request)")
+
+    threading.Thread(target=_warm, daemon=True, name="openf1-warmup").start()
 
 
 @app.get("/", include_in_schema=False)
