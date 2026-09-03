@@ -33,6 +33,31 @@ _CACHE: dict[str, tuple[float, object]] = {}
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
+# OpenF1 caps requests at 30 per 10s per IP. The per-key lock above only
+# de-dupes identical concurrent requests -- it does nothing to cap the
+# *overall* rate across the many different endpoints one season snapshot
+# touches (meetings, sessions, session_result, drivers, pit, laps -- times
+# every completed round). Without this, one page load easily fires 40+
+# distinct requests in a couple seconds and 429s almost everything.
+_RATE_LIMIT = 25          # stay under the documented 30, with headroom
+_RATE_WINDOW = 10.0       # seconds
+_request_times: list[float] = []
+_RATE_GUARD = threading.Lock()
+
+
+def _throttle() -> None:
+    with _RATE_GUARD:
+        now = time.time()
+        while _request_times and now - _request_times[0] > _RATE_WINDOW:
+            _request_times.pop(0)
+        if len(_request_times) >= _RATE_LIMIT:
+            sleep_for = _RATE_WINDOW - (now - _request_times[0]) + 0.05
+        else:
+            sleep_for = 0
+        _request_times.append(now + sleep_for)
+    if sleep_for > 0:
+        time.sleep(sleep_for)
+
 
 def _lock_for(key: str) -> threading.Lock:
     with _LOCKS_GUARD:
@@ -74,6 +99,7 @@ def _get(path: str, params: dict | None = None, ttl: int = _TTL):
         last_exc = None
         for attempt in range(_RETRIES + 1):
             try:
+                _throttle()
                 resp = httpx.get(f"{BASE_URL}{path}", params=params, timeout=_TIMEOUT)
                 resp.raise_for_status()
                 data = resp.json()
@@ -104,7 +130,26 @@ def get_meetings(year: int = 2026) -> list:
     return _get("/meetings", {"year": year}) or []
 
 
+def get_race_sessions_for_year(year: int = 2026) -> dict[int, dict]:
+    """All Race sessions for the year in ONE call, keyed by meeting_key.
+
+    Replaces calling /sessions once per meeting -- that's what was blowing
+    through OpenF1's 30 req/10s rate limit and causing every round past
+    Great Britain to 429 and silently fall back to stale bundled data.
+    """
+    sessions = _get("/sessions", {"year": year, "session_name": "Race"}) or []
+    # Defensive: filter client-side too, in case the server-side filter is
+    # ever ignored/unsupported and returns every session type for the year.
+    return {
+        s["meeting_key"]: s
+        for s in sessions
+        if s.get("meeting_key") is not None and s.get("session_name") == "Race"
+    }
+
+
 def get_race_session(meeting_key: int) -> dict | None:
+    """Kept for callers that only have one meeting_key; prefer
+    get_race_sessions_for_year() when checking multiple rounds."""
     sessions = _get("/sessions", {"meeting_key": meeting_key}) or []
     return next((s for s in sessions if s.get("session_name") == "Race"), None)
 
