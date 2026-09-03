@@ -67,15 +67,17 @@ The Python engine owns numerical outcomes. GPT-5.6 chooses analytical tools, com
 
 ![PitWall AI blinded challenge and validation scorecard](docs/pitwall-validation.png)
 
-The bundled snapshot is dated **2026-07-14**. Historical strategies are explicitly labeled **retrospective baselines**; they are not presented as predictions frozen before each race.
+Round status and results are fetched live from OpenF1 on every request, falling back to a bundled snapshot dated **2026-07-14** only if OpenF1 is unreachable for a given round -- so the app stays functional offline, per the "fully functional deterministic demo mode" behavior above. Historical strategies are explicitly labeled **retrospective baselines**; they are not presented as predictions frozen before each race.
 
-Current bundled scorecard:
+Bundled fallback scorecard (used only when live data is unavailable):
 
 - 9 completed rounds represented.
 - 8 rounds validated against captured official winner pit execution.
 - 1 explicit source gap: Austria.
 - 4.12-lap mean absolute first-stop error.
 - 50% pit-window hit rate.
+
+The live coverage and hit rate grow as more rounds complete; this fallback scorecard is a floor, not the app's current state.
 
 Actual execution is excluded from model inputs and is used only in the comparison layer. Imperfect results remain visible.
 
