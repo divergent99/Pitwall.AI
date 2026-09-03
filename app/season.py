@@ -146,7 +146,7 @@ def _live_round_result(name: str, venue: str) -> dict | None:
             logger.warning("season: no OpenF1 meeting matched for %s (venue=%s)", name, venue)
             return None
 
-        session = of1.get_race_session(meeting["meeting_key"])
+        session = of1.get_race_sessions_for_year(2026).get(meeting["meeting_key"])
         if not session:
             logger.warning("season: no Race session found for %s (meeting_key=%s)", name, meeting["meeting_key"])
             return None
@@ -277,7 +277,7 @@ def _live_standings() -> tuple[list, list] | None:
             logger.warning("season: no OpenF1 meeting for standings lookup (%s)", name)
             return None
 
-        session = of1.get_race_session(meeting["meeting_key"])
+        session = of1.get_race_sessions_for_year(2026).get(meeting["meeting_key"])
         if not session:
             logger.warning("season: no Race session for standings lookup (%s)", name)
             return None
