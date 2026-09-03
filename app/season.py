@@ -20,6 +20,8 @@ per-round bundled-fallback safety net as everything else here.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import date
 import random
 
@@ -373,7 +375,41 @@ def _standings() -> tuple[list, list]:
     return _live_standings() or _fallback_standings()
 
 
+# One page load fires /api/season/2026, /api/strategy/rounds,
+# /api/strategy/validation, and /api/strategy/backtest/{n} together --
+# validation_summary() and backtest_round() both call strategy_rounds()
+# internally too, so without this a single page load reran the full
+# per-round OpenF1 walk 3-4 times over, all piling onto the same
+# cold-start burst at once. A short shared cache with a lock (so
+# concurrent callers share one in-flight computation instead of racing
+# to each do their own) collapses that back down to one real computation.
+_MEMO_TTL = 20  # seconds -- short enough that a genuinely new result
+                # (a race finishing) still shows up quickly
+_memo: dict[str, tuple[float, object]] = {}
+_memo_locks: dict[str, threading.Lock] = {}
+_memo_locks_guard = threading.Lock()
+
+
+def _memoize(key: str, ttl: int, compute):
+    entry = _memo.get(key)
+    if entry is not None and time.time() - entry[0] < ttl:
+        return entry[1]
+    with _memo_locks_guard:
+        lock = _memo_locks.setdefault(key, threading.Lock())
+    with lock:
+        entry = _memo.get(key)
+        if entry is not None and time.time() - entry[0] < ttl:
+            return entry[1]
+        value = compute()
+        _memo[key] = (time.time(), value)
+        return value
+
+
 def strategy_rounds() -> dict:
+    return _memoize("strategy_rounds", _MEMO_TTL, _compute_strategy_rounds)
+
+
+def _compute_strategy_rounds() -> dict:
     calendar = {r[1]: r for r in CALENDAR}
     items = []
     for name, profile in STRATEGY_PROFILES.items():
@@ -475,6 +511,10 @@ def validation_summary() -> dict:
 
 
 def season_snapshot() -> dict:
+    return _memoize("season_snapshot", _MEMO_TTL, _compute_season_snapshot)
+
+
+def _compute_season_snapshot() -> dict:
     rounds = []
     fastest_laps = []
     for number, name, venue, race_date, sprint in CALENDAR:
