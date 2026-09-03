@@ -264,6 +264,41 @@ def _latest_past_round() -> tuple[str, str] | None:
     return latest[1], latest[2]
 
 
+def _driver_directory() -> dict[int, dict]:
+    """Merge /drivers across every completed round's Race session, keyed by
+    driver_number.
+
+    OpenF1's /drivers endpoint only lists drivers who actually raced that
+    specific session. A driver who sat out one round -- injury, a
+    mid-weekend reserve swap (e.g. someone promoted from a junior team for
+    a single race) -- simply won't appear in that session's list, even
+    though /championship_drivers still tracks their season points. Only
+    checking the latest session for metadata meant that driver's name/team
+    silently vanished from the standings table. Merging across every round
+    they DID race keeps their info available regardless of who's in the
+    latest lineup. Later rounds overwrite earlier ones so a driver who
+    changed teams mid-season still shows their current team.
+    """
+    meetings = of1.get_meetings(2026)
+    sessions_by_meeting = of1.get_race_sessions_for_year(2026)
+    directory: dict[int, dict] = {}
+    today = date.today()
+    for _number, name, venue, race_date, _sprint in CALENDAR:
+        if name in DISRUPTED_ROUNDS or date.fromisoformat(race_date) > today:
+            continue
+        meeting = of1.find_meeting(meetings, VENUE_ALIASES.get(venue, venue))
+        if not meeting:
+            continue
+        session = sessions_by_meeting.get(meeting["meeting_key"])
+        if not session:
+            continue
+        for d in of1.get_drivers(session["session_key"]):
+            driver_number = d.get("driver_number")
+            if driver_number is not None:
+                directory[driver_number] = d
+    return directory
+
+
 def _live_standings() -> tuple[list, list] | None:
     latest = _latest_past_round()
     if not latest:
@@ -292,24 +327,32 @@ def _live_standings() -> tuple[list, list] | None:
             return None
 
         # championship_drivers only has driver_number + points/position -- need
-        # /drivers for names, code, nationality, team.
-        drivers_meta = {d["driver_number"]: d for d in of1.get_drivers(session["session_key"])}
+        # /drivers for names, code, nationality, team. Built from every
+        # completed round (not just the latest session) so a driver who
+        # sat out the most recent race still has metadata -- see
+        # _driver_directory().
+        drivers_meta = _driver_directory()
 
         drivers_data = []
         for row in sorted(driver_rows, key=lambda r: r.get("position_current", 999)):
             meta = drivers_meta.get(row.get("driver_number"), {})
+            # `or ""` on every field: OpenF1 sometimes returns a key with an
+            # explicit JSON null rather than omitting it, and
+            # dict.get(key, default) only applies the default when the key
+            # is *absent* -- an explicit null sails right through and
+            # serializes back out as literal "null" in the response.
             drivers_data.append({
                 "position": row.get("position_current"),
-                "code": meta.get("name_acronym", ""),
-                "name": meta.get("full_name") or meta.get("broadcast_name", ""),
-                "nationality": meta.get("country_code", ""),
-                "team": _normalize_team(meta.get("team_name")),
+                "code": meta.get("name_acronym") or "",
+                "name": meta.get("full_name") or meta.get("broadcast_name") or "",
+                "nationality": meta.get("country_code") or "",
+                "team": _normalize_team(meta.get("team_name")) or "",
                 "points": row.get("points_current"),
             })
 
         teams_data = []
         for row in sorted(team_rows, key=lambda r: r.get("position_current", 999)):
-            team = _normalize_team(row.get("team_name"))
+            team = _normalize_team(row.get("team_name")) or ""
             teams_data.append({
                 "position": row.get("position_current"),
                 "name": team,
